@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Delete every record tagged Data_Source__c = 'Demo Data' (Opportunities, Contacts, Accounts).
+Delete every record tagged Data_Source__c = 'Demo Data' (Tasks, Cases, Opportunities, Contacts, Accounts).
 
   python3 scripts/demo-data/wipe.py               # asks for confirmation
   python3 scripts/demo-data/wipe.py --yes         # no prompt
@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 
-ORDER = ["Opportunity", "Contact", "Account"]  # children first
+ORDER = ["Task", "Case", "Opportunity", "Contact", "Account"]  # children first
 
 
 def query_ids(obj, org):

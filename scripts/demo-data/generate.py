@@ -17,6 +17,7 @@ and the RevOps_Demo_Data permission set assigned to the loading user.
 """
 import argparse
 import csv
+import json
 import datetime as dt
 import os
 import random
@@ -136,7 +137,7 @@ def build(seed, today):
                 "FirstName": fn, "LastName": ln, "Title": title,
                 "Email": f"{fn.lower()}.{ln.lower()}@{a['_slug']}.example.com",
                 "Phone": f"+1-555-{rng.randint(100,999)}-{rng.randint(1000,9999)}",
-                "LeadSource": wchoice(rng, LEAD_SOURCES), "Data_Source__c": TAG,
+                "LeadSource": wchoice(rng, LEAD_SOURCES), "Data_Source__c": TAG, "_role": role,
             })
             a["_contacts"].append((cid, role))
 
@@ -234,44 +235,202 @@ def build(seed, today):
                 amt = prior_amt  # keep lost ARR visible on the opp
             nxt = ""
         else:
-            # open renewal
-            days_out = (due - today).days
-            if x < 0.17:
-                status = "At Risk - Downsell"
-                amt = round_amt(prior * rng.uniform(0.5, 0.8))
-                desc = rng.choice(["Customer requested 30% seat reduction", "Usage down 40% QoQ; budget cuts",
-                                   "Evaluating cheaper competitor for part of the footprint"])
-                nxt = "Exec QBR to defend seat count"
-            elif x < 0.32:
-                status = "At Risk - Delayed"
-                amt = round_amt(prior * rng.uniform(0.95, 1.05))
-                desc = rng.choice(["Procurement freeze until next quarter", "New CFO re-reviewing all vendors",
-                                   "Champion departed; re-establishing sponsor", "Legal stuck on DPA terms"])
-                nxt = "Secure short-term extension"
-            else:
-                status = "On Track"
-                amt = round_amt(prior * rng.uniform(1.0, 1.08))
-                desc = "Healthy usage; standard renewal"
-                nxt = "Send renewal quote" if days_out < 60 else "Renewal kickoff at 90 days"
-            if status == "At Risk - Delayed":
-                close = due + dt.timedelta(days=rng.randint(30, 90))
-            else:
-                close = max(due, today + dt.timedelta(days=5))
-            if days_out < 30:
-                stage = "Negotiation/Review"
-            elif days_out < 90:
-                stage = "Proposal/Price Quote"
-            elif days_out < 180:
-                stage = "Value Proposition"
-            else:
-                stage = "Qualification"
-            if status != "On Track" and stage in ("Negotiation/Review",):
-                stage = "Perception Analysis"
+            # open renewal: filled in by plant_risk() once each account has a scenario
+            base.update({"_open": True, "_due": due, "_prior": prior})
+            renewals.append(base)
+            continue
         base.update({"StageName": stage, "CloseDate": close.isoformat(), "Amount": amt,
                      "Renewal_Status__c": status, "Description": desc, "NextStep": nxt})
         renewals.append(base)
 
-    return accounts, contacts, opps, renewals
+    cases, tasks, answer_key = plant_risk(random.Random(seed + 1), today, accounts, contacts, renewals)
+    return accounts, contacts, opps, renewals, cases, tasks, answer_key
+
+
+# ---------------------------------------------------------------------------
+# Risk scenarios (see docs/risk-rubric.md)
+#
+# Each account with an open renewal gets one scenario. The scenario decides
+# which warning signs we plant in Salesforce and what the rep's Renewal_Status__c says:
+#
+#   healthy      rep: On Track            no warning signs
+#   downsell     rep: At Risk - Downsell  DOWNSELL + LOW_USAGE (+ maybe ESCALATIONS)
+#   delayed      rep: At Risk - Delayed   SLIPPING + CHAMPION_LEFT + GONE_QUIET
+#   hidden       rep: On Track            2-3 account warning signs the rep isn't reflecting
+#   watch        rep: On Track            one moderate warning sign (lands in the Watch band)
+#   false_alarm  rep: At Risk - Delayed   no warning signs (flag not backed by evidence)
+#
+# The answer key records exactly which signals each open renewal carries, so the agent can be checked against it.
+# ---------------------------------------------------------------------------
+SIGNAL_POINTS = {"PAST_DUE": 30, "SLIPPING": 20, "DOWNSELL": 20, "LOW_USAGE": 20,
+                 "CHAMPION_LEFT": 15, "ESCALATIONS": 15, "GONE_QUIET": 10, "STALLED": 10}
+SCENARIO_W = [("healthy", 45), ("watch", 10), ("downsell", 12), ("delayed", 10), ("hidden", 13), ("false_alarm", 10)]
+# Renewals due this quarter (or past due) cycle through every scenario so the demo always shows each case.
+IN_SCOPE_CYCLE = ["delayed", "hidden", "healthy", "downsell", "false_alarm", "watch", "hidden", "healthy"]
+REP_STATUS = {"healthy": "On Track", "hidden": "On Track", "watch": "On Track", "downsell": "At Risk - Downsell",
+              "delayed": "At Risk - Delayed", "false_alarm": "At Risk - Delayed"}
+ESCALATION_SUBJECTS = ["Sync failures blocking forecast roll-up", "SSO outage for sales team",
+                       "Data export missing opportunities", "Dashboard performance degraded",
+                       "Integration errors after CRM upgrade"]
+ROUTINE_SUBJECTS = ["How to add a user", "Report filter question", "Request for training session",
+                    "Change billing contact", "Feature request: custom fields"]
+TASK_SUBJECTS = ["QBR", "Check-in call", "Sent product update", "Adoption review", "Exec sponsor sync",
+                 "Renewal planning call", "Training session"]
+
+
+def quarter_bounds(d):
+    """Calendar quarter (the demo org's fiscal year starts in January)."""
+    start = dt.date(d.year, 3 * ((d.month - 1) // 3) + 1, 1)
+    return start, add_months(start, 3) - dt.timedelta(days=1)
+
+
+def plant_risk(rng, today, accounts, contacts, renewals):
+    q_start, q_end = quarter_bounds(today)
+    acc_by_id = {a["Demo_External_Id__c"]: a for a in accounts}
+    open_by_acc = {}
+    for r in renewals:
+        if r.get("_open"):
+            open_by_acc.setdefault(r["Account.Demo_External_Id__c"], []).append(r)
+
+    # 1. Pick a scenario per account (earliest open renewal decides whether it's "in scope" this quarter)
+    def in_scope(r):
+        return r["_due"] <= q_end
+    accs = sorted(open_by_acc, key=lambda a: min(r["_due"] for r in open_by_acc[a]))
+    i = 0
+    for acc_id in accs:
+        if any(in_scope(r) for r in open_by_acc[acc_id]):
+            acc_by_id[acc_id]["_scenario"] = IN_SCOPE_CYCLE[i % len(IN_SCOPE_CYCLE)]
+            i += 1
+        else:
+            acc_by_id[acc_id]["_scenario"] = wchoice(rng, SCENARIO_W)
+
+    # 2. Decide the account-level signals for each scenario
+    for a in accounts:
+        sc = a.get("_scenario")
+        sig = set()
+        if sc == "downsell":
+            sig = {"LOW_USAGE"} | ({"ESCALATIONS"} if rng.random() < 0.5 else set())
+        elif sc == "delayed":
+            sig = {"CHAMPION_LEFT", "GONE_QUIET"}
+        elif sc == "hidden":
+            sig = rng.choice([{"ESCALATIONS", "LOW_USAGE", "GONE_QUIET"}, {"CHAMPION_LEFT", "ESCALATIONS", "GONE_QUIET"}])
+        elif sc == "watch":
+            sig = rng.choice([{"LOW_USAGE"}, {"ESCALATIONS", "GONE_QUIET"}])
+        a["_acc_signals"] = sig
+
+    # 3. Fill in the open renewals (rep status, amount, close date, stage) per scenario
+    for acc_id, rens in open_by_acc.items():
+        sc = acc_by_id[acc_id]["_scenario"]
+        for r in rens:
+            due, prior = r["_due"], r["_prior"]
+            days_out = (due - today).days
+            if sc == "downsell":
+                amt = round_amt(prior * rng.uniform(0.5, 0.8))
+                desc = rng.choice(["Customer requested 30% seat reduction", "Budget cuts; asking for fewer seats",
+                                   "Evaluating cheaper competitor for part of the footprint"])
+                nxt = "Exec QBR to defend seat count"
+            else:
+                amt = round_amt(prior * rng.uniform(1.0, 1.08))
+                desc = {"delayed": "Procurement slow; renewal paperwork not started",
+                        "false_alarm": "Rep worried about timing; customer has not confirmed",
+                        }.get(sc, "Standard renewal")
+                nxt = "Secure short-term extension" if sc == "delayed" else (
+                    "Send renewal quote" if days_out < 60 else "Renewal kickoff at 90 days")
+            if sc == "delayed":
+                close = due + dt.timedelta(days=rng.randint(30, 90))   # rep pushed it past the renewal date
+            elif due >= today:
+                close = due
+            else:
+                close = today + dt.timedelta(days=rng.randint(3, 10))  # past due: rep moved close date forward
+            stage = ("Negotiation/Review" if days_out < 30 else "Proposal/Price Quote" if days_out < 90
+                     else "Value Proposition" if days_out < 180 else "Qualification")
+            if sc in ("downsell", "delayed") and stage == "Negotiation/Review":
+                stage = "Perception Analysis"
+            if sc == "hidden" and 0 <= days_out <= 60 and rng.random() < 0.5:
+                stage = "Value Proposition"  # quietly stuck
+            r.update({"StageName": stage, "CloseDate": close.isoformat(), "Amount": amt,
+                      "Renewal_Status__c": REP_STATUS[sc], "Description": desc, "NextStep": nxt})
+
+    # 4. Write account-level signals into Salesforce records
+    cases, tasks = [], []
+    con_by_acc = {}
+    for c in contacts:
+        con_by_acc.setdefault(c["Account.Demo_External_Id__c"], []).append(c)
+    n_case = 0
+    for a in accounts:
+        acc_id, sig = a["Demo_External_Id__c"], a["_acc_signals"]
+        is_customer = a["Type"] == "Customer - Direct"
+        # License utilization (customers only)
+        a["License_Utilization__c"] = (rng.randint(22, 44) if "LOW_USAGE" in sig
+                                       else rng.randint(60, 96) if is_customer else "")
+        # Champion: the contact whose title maps to the Champion role (else the first contact)
+        cons = con_by_acc.get(acc_id, [])
+        champ = next((c for c in cons if c["_role"] == "Champion"), cons[0] if cons else None)
+        for c in cons:
+            c["Champion__c"] = "true" if c is champ else "false"
+            # noise: a non-champion occasionally leaves (must NOT trigger CHAMPION_LEFT)
+            c["Left_Company__c"] = "true" if (c is champ and "CHAMPION_LEFT" in sig) or (
+                c is not champ and rng.random() < 0.06) else "false"
+        if not is_customer:
+            continue
+        # Cases: history for everyone (closed, any priority) + routine open low/medium noise
+        for _ in range(rng.randint(1, 4)):
+            n_case += 1
+            cases.append(case_row(n_case, acc_id, rng.choice(ROUTINE_SUBJECTS + ESCALATION_SUBJECTS),
+                                  rng.choice(["High", "Medium", "Low"]), "Closed"))
+        if rng.random() < 0.4:
+            n_case += 1
+            cases.append(case_row(n_case, acc_id, rng.choice(ROUTINE_SUBJECTS), rng.choice(["Medium", "Low"]),
+                                  rng.choice(["New", "Working"])))
+        if "ESCALATIONS" in sig:
+            for _ in range(rng.randint(1, 2)):
+                n_case += 1
+                cases.append(case_row(n_case, acc_id, rng.choice(ESCALATION_SUBJECTS), "High",
+                                      rng.choice(["New", "Working", "Escalated"])))
+        # Activity: completed touches; newest within 25 days, or 35-120 days ago if GONE_QUIET
+        newest = rng.randint(35, 120) if "GONE_QUIET" in sig else rng.randint(2, 25)
+        for k in range(rng.randint(3, 7)):
+            ago = newest if k == 0 else rng.randint(newest + 3, 180)
+            tasks.append({"_acc": acc_id, "Subject": rng.choice(TASK_SUBJECTS), "Status": "Completed",
+                          "Priority": "Normal", "ActivityDate": (today - dt.timedelta(days=ago)).isoformat(),
+                          "Data_Source__c": TAG})
+        if rng.random() < 0.5:  # noise: a scheduled (not completed) future task doesn't count as activity
+            tasks.append({"_acc": acc_id, "Subject": "Renewal planning call", "Status": "Not Started",
+                          "Priority": "Normal", "ActivityDate": (today + dt.timedelta(days=rng.randint(3, 20))).isoformat(),
+                          "Data_Source__c": TAG})
+
+    # 5. Answer key: what each open renewal really looks like
+    stage_rank = {s: i for i, s in enumerate(STAGE_ORDER)}
+    key = []
+    for acc_id, rens in open_by_acc.items():
+        a = acc_by_id[acc_id]
+        for r in rens:
+            due, close = r["_due"], dt.date.fromisoformat(r["CloseDate"])
+            sig = set(a["_acc_signals"])
+            if due < today:
+                sig.add("PAST_DUE")
+            elif close > due:  # only counts before the renewal date; afterwards PAST_DUE covers it
+                sig.add("SLIPPING")
+            if r["Amount"] <= 0.9 * r["_prior"]:
+                sig.add("DOWNSELL")
+            if (due - today).days <= 60 and stage_rank[r["StageName"]] < stage_rank["Proposal/Price Quote"]:
+                sig.add("STALLED")
+            score = sum(SIGNAL_POINTS[s] for s in sig)
+            key.append({
+                "renewal_id": r["Demo_External_Id__c"], "account": a["Name"], "segment": a["Segment__c"],
+                "renewal_date": due.isoformat(), "in_scope_this_quarter": "yes" if due <= q_end else "no",
+                "scenario": a["_scenario"], "rep_status": r["Renewal_Status__c"],
+                "prior_arr": r["_prior"], "amount": r["Amount"],
+                "signals": ";".join(sorted(sig, key=lambda s: -SIGNAL_POINTS[s])), "score": score,
+                "band": "At Risk" if score >= 40 else "Watch" if score >= 20 else "Healthy",
+            })
+    key.sort(key=lambda k: (k["renewal_date"], k["renewal_id"]))
+    return cases, tasks, key
+
+
+def case_row(n, acc_id, subject, priority, status):
+    return {"Account.Demo_External_Id__c": acc_id, "Subject": subject, "Priority": priority, "Status": status,
+            "Origin": "Email", "Data_Source__c": TAG}
 
 
 def write_csv(path, rows):
@@ -301,16 +460,19 @@ def main():
     args = p.parse_args()
 
     today = dt.date.fromisoformat(args.as_of)
-    accounts, contacts, opps, renewals = build(args.seed, today)
+    accounts, contacts, opps, renewals, cases, tasks, answer_key = build(args.seed, today)
     os.makedirs(OUT, exist_ok=True)
     files = {
         "Account": write_csv(os.path.join(OUT, "accounts.csv"), accounts),
         "Contact": write_csv(os.path.join(OUT, "contacts.csv"), contacts),
         "Opportunity": write_csv(os.path.join(OUT, "opportunities.csv"), opps),
         "Renewal": write_csv(os.path.join(OUT, "renewals.csv"), renewals),
+        "Case": write_csv(os.path.join(OUT, "cases.csv"), cases),
     }
-    print(f"Generated {len(accounts)} accounts, {len(contacts)} contacts, "
-          f"{len(opps)} opportunities, {len(renewals)} renewals -> {OUT}")
+    write_csv(os.path.join(OUT, "answer_key.csv"), answer_key)
+    print(f"Generated {len(accounts)} accounts, {len(contacts)} contacts, {len(opps)} opportunities, "
+          f"{len(renewals)} renewals, {len(cases)} cases, {len(tasks)} tasks -> {OUT}")
+    print(f"Answer key: {OUT}/answer_key.csv (as of {today}, {len(answer_key)} open renewals)")
     if args.no_load:
         return
 
@@ -321,7 +483,21 @@ def main():
     sf("data", "upsert", "bulk", "--sobject", "Contact", "--file", files["Contact"], *org)
     sf("data", "upsert", "bulk", "--sobject", "Opportunity", "--file", files["Opportunity"], *org)
     sf("data", "upsert", "bulk", "--sobject", "Opportunity", "--file", files["Renewal"], *org)
+    ins = ["--target-org", args.target_org, "--wait", "15"]
+    sf("data", "import", "bulk", "--sobject", "Case", "--file", files["Case"], *ins)
+    # Tasks link to accounts by Salesforce Id (WhatId is polymorphic), so look the Ids up first
+    acc_ids = account_id_map(args.target_org)
+    for t in tasks:
+        t["WhatId"] = acc_ids[t["_acc"]]
+    sf("data", "import", "bulk", "--sobject", "Task", "--file", write_csv(os.path.join(OUT, "tasks.csv"), tasks), *ins)
     print("Load complete.")
+
+
+def account_id_map(org):
+    res = subprocess.run(["sf", "data", "query", "--query",
+                          "SELECT Id, Demo_External_Id__c FROM Account WHERE Data_Source__c = 'Demo Data'",
+                          "--target-org", org, "--json"], text=True, capture_output=True)
+    return {r["Demo_External_Id__c"]: r["Id"] for r in json.loads(res.stdout)["result"]["records"]}
 
 
 if __name__ == "__main__":

@@ -17,11 +17,12 @@ An LLM agent connected to Salesforce, Slack and Gmail. It finds churn/renewal ri
 - Org alias: `revops-demo` (the default org). Use the `sf` CLI for queries and loads.
 - Demo data is tagged `Data_Source__c = 'Demo Data'` and has an upsert key in `Demo_External_Id__c`. Filter on the tag when the analysis should cover demo data only.
 - Renewal model: Opportunity `Type = 'Renewal'`, with `Renewal_Status__c` (On Track, At Risk - Downsell, At Risk - Delayed, Renewed, Renewed - Downsell, Churned), `Original_Opportunity__c`, `Prior_ARR__c`, `Contract_Start_Date__c` and `Contract_End_Date__c`. Account `Segment__c`.
+- Risk signals: Account `License_Utilization__c`, Contact `Champion__c` / `Left_Company__c`, open High-priority Cases, and completed Tasks. Scoring rules are in `docs/risk-rubric.md`, and the v1 plan is in `docs/plan-v1.md`.
 - State/Country picklists are on, so write addresses with `BillingCountryCode` and `BillingStateCode`.
 - Metadata lives in `force-app/`. Deploy with `sf project deploy start --source-dir force-app`. Field access comes from the `RevOps_Demo_Data` permission set.
 
 ## Demo data
-- `python3 scripts/demo-data/generate.py` deletes the tagged records, regenerates them and reloads them (seed 42; add `--as-of YYYY-MM-DD` to reproduce a past run).
+- `python3 scripts/demo-data/generate.py --as-of 2026-11-10` deletes the tagged records, regenerates them, reloads them, and writes `out/answer_key.csv` (the expected risk signals for each open renewal). Seed 42.
 - `python3 scripts/demo-data/wipe.py` deletes the tagged records only. Never bulk-delete untagged records.
 
 ## Acting autonomously: guardrails
