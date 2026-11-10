@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "revops": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "--quiet", "--project", "revops_mcp", "python", "revops_mcp/server.py"],
+      "env": { "REVOPS_ORG": "revops-demo", "REVOPS_DEMO_ONLY": "true" }
+    }
+  }
+}

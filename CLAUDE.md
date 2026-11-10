@@ -21,6 +21,11 @@ An LLM agent connected to Salesforce, Slack and Gmail. It finds churn/renewal ri
 - State/Country picklists are on, so write addresses with `BillingCountryCode` and `BillingStateCode`.
 - Metadata lives in `force-app/`. Deploy with `sf project deploy start --source-dir force-app`. Field access comes from the `RevOps_Demo_Data` permission set.
 
+## RevOps MCP server (`revops_mcp/`)
+- These are read-only tools registered in `.mcp.json`: `get_renewal_risk(period, segment?, as_of?)` and `get_renewal_detail(renewal, as_of?)`. Use their scores, dollar figures and reasons exactly as returned; don't recompute them.
+- Scoring lives in `revops_mcp/risk.py`. Keep it in sync with `docs/risk-rubric.md`.
+- Tests: `uv run --project revops_mcp pytest revops_mcp/tests` (the live-org tests need the demo data loaded with `--as-of 2026-11-10`).
+
 ## Demo data
 - `python3 scripts/demo-data/generate.py --as-of 2026-11-10` deletes the tagged records, regenerates them, reloads them, and writes `out/answer_key.csv` (the expected risk signals for each open renewal). Seed 42.
 - `python3 scripts/demo-data/wipe.py` deletes the tagged records only. Never bulk-delete untagged records.
