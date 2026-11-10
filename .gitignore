@@ -1,0 +1,49 @@
+# ---- Salesforce CLI auth / org state (NEVER commit) ----
+.sf/
+.sfdx/
+.sfdx-auth*
+*sfdxAuthUrl*
+*authUrl*.txt
+auth*.json
+*.jwt
+*.key
+*.pem
+*.crt
+*.p12
+server.key
+.env
+.env.*
+!.env.example
+
+# ---- Salesforce local tooling ----
+.localdevserver/
+.sfdx-hardis*/
+deploy-options.json
+**/lwc/jsconfig.json
+**/aura/jsconfig.json
+**/.eslintrc.json.bak
+coverage/
+*.log
+logs/
+
+# Bulk API result files written by `sf data ... bulk`
+*-success-records.csv
+*-failed-records.csv
+*-unprocessed-records.csv
+
+# Generated demo-data CSVs (recreate with scripts/demo-data/generate.py)
+scripts/demo-data/out/
+
+# ---- Vendored agent skills (reinstall from skills-lock.json) ----
+.agents/
+.claude/skills/
+.claude/settings.local.json
+
+# ---- Node / Python / OS / editors ----
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+.idea/
+.vscode/settings.json
