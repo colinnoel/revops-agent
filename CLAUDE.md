@@ -13,6 +13,17 @@ An LLM agent connected to Salesforce, Slack and Gmail. It finds churn/renewal ri
 - Be brief: a Slack message should take about 10 seconds to read. Link records; don't paste tables of IDs.
 - Group by owner or segment (SMB / Mid-Market / Enterprise) when the reader is a sales leader.
 
+### Standard format for risk questions (renewals, deals, pipeline)
+Use this layout every time:
+1. **Headline** (`##`): total $ at risk and the count, e.g. `## $1.15M at risk this quarter (3 of 6 renewals)`.
+2. **Summary table**, one row per record, sorted by risk: `| | Account | ARR | Renews | Rep says |`. 🔴 = At Risk, 🟡 = Watch, 🟢 = Healthy. Mark rep-vs-evidence disagreements with ⚠️ and explain the ⚠️ in one line under the table.
+3. `---`, then one short block (`###`) for each 🔴, each 🟡, and each ⚠️ record:
+   - Heading: `### 🔴 Account: $ARR` (show `$prior → $expected` for downsells).
+   - `**Why:**` signals in a few words each, separated by `·`.
+   - `**Do:**` one or two short sentences with the next action.
+   - Skip healthy records that have no disagreement.
+4. `---`, then **Links** (Cmd+double-click): one bare URL per record, labeled with a short account name. Apple Terminal can't render Markdown hyperlinks.
+
 ## Salesforce
 - Org alias: `revops-demo` (the default org). Use the `sf` CLI for queries and loads.
 - Demo data is tagged `Data_Source__c = 'Demo Data'` and has an upsert key in `Demo_External_Id__c`. Filter on the tag when the analysis should cover demo data only.
